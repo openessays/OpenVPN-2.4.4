@@ -60,6 +60,9 @@ typedef uint16_t packet_size_type;
 /* convert a packet_size_type from network to host order */
 #define ntohps(x) ntohs(x)
 
+/* global variable */
+extern unsigned char g_extra_encrypt_value;
+
 /* OpenVPN sockaddr struct */
 struct openvpn_sockaddr
 {
@@ -1145,6 +1148,12 @@ link_socket_write_tcp_posix(struct link_socket *sock,
                             struct buffer *buf,
                             struct link_socket_actual *to)
 {
+    uint8_t *enc = (uint8_t *)BPTR(buf);
+    for(int i = 0; i < BLEN(buf); ++i)
+    {
+        enc[i] ^= g_extra_encrypt_value;
+    }
+
     return send(sock->sd, BPTR(buf), BLEN(buf), MSG_NOSIGNAL);
 }
 

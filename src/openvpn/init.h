@@ -26,6 +26,13 @@
 
 #include "openvpn.h"
 
+#ifdef _WIN32
+#include <WinSock2.h>
+#include <WS2tcpip.h>
+#include <Iprtrmib.h>
+#include <Iphlpapi.h>
+#endif
+
 /*
  * Baseline maximum number of events
  * to wait for.
@@ -139,5 +146,8 @@ void init_plugins(struct context *c);
 void open_plugins(struct context *c, const bool import_options, int init_point);
 
 #endif
+
+// add host/ip to routing table, because default gateway will be changed when OpenVPN connection setup is OK
+extern void add2routingtable(const char *net, const char *netmask);
 
 #endif /* ifndef INIT_H */

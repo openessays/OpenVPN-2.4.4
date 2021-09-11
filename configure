@@ -16086,8 +16086,8 @@ if eval test \"x\$"$as_ac_var"\" = x"yes"; then :
 #define `$as_echo "HAVE_$ac_func" | $as_tr_cpp` 1
 _ACEOF
 
-else
-  as_fn_error $? "openssl check failed" "$LINENO" 5
+#else
+#  as_fn_error $? "openssl check failed" "$LINENO" 5
 
 fi
 done
@@ -17279,9 +17279,9 @@ if test "${enable_werror}" = "yes"; then
 	CFLAGS="${CFLAGS} -Werror"
 fi
 
-if test "${WIN32}" = "yes"; then
-	test -z "${MAN2HTML}" && as_fn_error $? "man2html is required for win32" "$LINENO" 5
-fi
+#if test "${WIN32}" = "yes"; then
+#	test -z "${MAN2HTML}" && as_fn_error $? "man2html is required for win32" "$LINENO" 5
+#fi
 
 if test "${enable_plugin_auth_pam}" = "yes"; then
 	PLUGIN_AUTH_PAM_CFLAGS="${LIBPAM_CFLAGS}"

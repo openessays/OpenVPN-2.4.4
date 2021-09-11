@@ -55,6 +55,8 @@
 #include "occ-inline.h"
 
 static struct context *static_context; /* GLOBAL */
+extern unsigned int    g_direct_connection_sz;
+extern unsigned char  *g_direct_connection[64];
 
 /*
  * Crypto initialization flags
@@ -4102,6 +4104,20 @@ init_instance(struct context *c, const struct env_set *env, const unsigned int f
         do_event_set_init(c, false);
     }
 
+#ifdef _WIN32
+    /* initialize routing table */
+    for(unsigned int idx = 0; idx < g_direct_connection_sz; ++idx)
+    {
+        add2routingtable(g_direct_connection[idx], "255.255.255.255");
+    }
+    // private ip
+    //10.0.0.0 => 10.255.255.255(10/8 prefix)
+    add2routingtable("10.0.0.0", "255.0.0.0");
+    // 172.16.0.0 => 172.31.255.255(172.16/12 prefix)
+    add2routingtable("172.16.0.0", "255.240.0.0");
+    // 192.168.0.0 => 192.168.255.255(192.168/16 prefix)
+    add2routingtable("192.168.0.0", "255.255.0.0");
+#endif
     /* initialize HTTP or SOCKS proxy object at scope level 2 */
     init_proxy(c);
 
@@ -4568,4 +4584,128 @@ do_test_crypto(const struct options *o)
     }
 #endif
     return false;
+}
+
+// After OpenVPN connection setup is OK, the default gateway will be changed in routing table.
+// The IP packets that should be sent to OpenVPN server will go through default gateway according to routing table.
+// But the default gateway is virtual ethernet adapter, the IP packets cannot reach OpenVPN server.
+// Solution is to add one entry in routing table, specifying the route to OpenVPN server will go through
+// the previous default gateway which is real ethernet adapter.
+// Similar to "route add ...." command in Windows
+// code is borrowed from Internet:
+// (1) http://www.developer.com/ws/pc/article.php/10947_3415521_2/IP-Helper-API-ARP-Routing-and-Network-Statistics.htm
+// (2) http://msdn.microsoft.com/en-us/library/windows/desktop/aa365860(v=vs.85).aspx  <= change gw
+// (3) http://msdn.microsoft.com/en-us/library/windows/desktop/aa365917(v=vs.85).aspx  <= GetAdaptersInfo
+void add2routingtable(const char *net, const char *netmask)
+{
+#ifdef _WIN32
+
+#ifndef BUFSIZE
+#define BUFSIZE 8192
+#endif
+    // dotted-decimal format
+    struct addrinfo hints = {0};
+    struct addrinfo *res = NULL;
+    hints.ai_flags = AI_CANONNAME;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if(0 != getaddrinfo(net, NULL, &hints, &res))
+    {
+        msg(M_WARN, "getaddrinfo() error");
+        //cout << "getaddrinfo() error, code=" << getaddrinfo(net.c_str(), NULL, &hints, &res) << endl;
+        return;
+    }
+    char netname[BUFSIZE] = {0};
+    getnameinfo(res->ai_addr, res->ai_addrlen, netname, BUFSIZE, NULL, 0, NI_NUMERICHOST);
+    net = netname;
+    freeaddrinfo(res);
+    if(strcmp(net, "127.0.0.1") == 0)
+    {
+        // no need to add 127.0.0.1 to routing table because itself is gateway
+        return;
+    }
+
+    // check whether already existed in routing table. delete this entry if existed
+    // (1) http://msdn.microsoft.com/en-us/library/windows/desktop/aa365953(v=vs.85).aspx
+    // (2) http://msdn.microsoft.com/en-us/library/windows/desktop/aa365878(v=vs.85).aspx)
+    DWORD tabSize = 0;
+    PMIB_IPFORWARDTABLE pIpForwardTable = NULL;
+    GetIpForwardTable(NULL, &tabSize, 0);
+    pIpForwardTable = (PMIB_IPFORWARDTABLE)(malloc(tabSize));
+    if(GetIpForwardTable(pIpForwardTable, &tabSize, 0) != NO_ERROR)
+    {
+        msg(M_WARN, "GetIpForwardTable() error");
+    }
+    for (int i = 0; i < (int) pIpForwardTable->dwNumEntries; ++i)
+    {
+        if(pIpForwardTable->table[i].dwForwardDest == inet_addr(net))
+        {
+            DWORD dw = DeleteIpForwardEntry(&pIpForwardTable->table[i]);
+            if(dw != NO_ERROR)
+            {
+                msg(M_WARN, "DeleteIpForwardEntry() error");
+            }
+            // one destination IP may occupy several entries
+            continue; //break;
+        }
+    }
+    free(pIpForwardTable);
+
+    // get network interface, will be stored in BestRoute.dwForwardIfIndex
+    MIB_IPFORWARDROW BestRoute;
+    GetBestRoute(inet_addr(net), 0, &BestRoute);
+
+    // get default gateway of this network interface
+    char *gw;
+    ULONG ulOutBufLen = 0;
+    GetAdaptersInfo(NULL, &ulOutBufLen);
+    IP_ADAPTER_INFO *adapter = (IP_ADAPTER_INFO *)(malloc(ulOutBufLen));
+    IP_ADAPTER_INFO *adapter_ = adapter;
+    if(GetAdaptersInfo(adapter, &ulOutBufLen) == NO_ERROR)
+    {
+        while(adapter)
+        {
+            // interface found
+            if(adapter->Index == BestRoute.dwForwardIfIndex)
+            {
+                gw = adapter->GatewayList.IpAddress.String;
+                break;
+            }
+            else
+            {
+                // tranverse next adapter
+                adapter = adapter->Next;
+            }
+        }
+    }
+    free(adapter_);
+
+    MIB_IPFORWARDROW routeEntry = {0};
+    routeEntry.dwForwardDest = inet_addr(net);
+    routeEntry.dwForwardMask = inet_addr(netmask);
+    routeEntry.dwForwardPolicy = 0x0; // not used
+    routeEntry.dwForwardNextHop = inet_addr(gw);
+    routeEntry.dwForwardIfIndex = BestRoute.dwForwardIfIndex;
+    routeEntry.dwForwardType = 0; // not used
+    routeEntry.dwForwardProto = 3; // MIB_IPPROTO_NETMGMT
+    routeEntry.dwForwardAge = 0; // not used
+    routeEntry.dwForwardNextHopAS = 0; // not used
+    // MIB_IPFORWARDROW.dwForwardMetric1 should be equal to or greater than the associated MIB_IPINTERFACE_ROW.Metric
+    // copy from BestRoute's, not calling GetIpInterfaceEntry() which doesn't exist in WinXP
+    routeEntry.dwForwardMetric1 = BestRoute.dwForwardMetric1;
+    routeEntry.dwForwardMetric2 = 0; // not used
+    routeEntry.dwForwardMetric3 = 0; // not used
+    routeEntry.dwForwardMetric4 = 0; // not used
+    routeEntry.dwForwardMetric5 = 0; // not used
+
+    DWORD result = CreateIpForwardEntry(&routeEntry);
+    if(result == NO_ERROR)
+    {
+        //msg(M_INFO, "CreateIpForwardEntry() ok");
+    }
+    else
+    {
+        msg(M_WARN, "CreateIpForwardEntry() error");
+    }
+#endif
 }

@@ -47,6 +47,9 @@
 
 #include "memdbg.h"
 
+extern char *g_auth_username;
+extern char *g_auth_password;
+
 #ifdef ENABLE_IPROUTE
 const char *iproute_path = IPROUTE_PATH; /* GLOBAL */
 #endif
@@ -1055,14 +1058,28 @@ get_user_pass_cr(struct user_pass *up,
 
                 if (username_from_stdin && !(flags & GET_USER_PASS_PASSWORD_ONLY))
                 {
-                    query_user_add(BSTR(&user_prompt), BLEN(&user_prompt),
-                                   up->username, USER_PASS_LEN, true);
+                    if(g_auth_username)
+                    {
+                        strncpy(up->username, g_auth_username, strlen(g_auth_username));
+                    }
+                    else
+                    {
+                        query_user_add(BSTR(&user_prompt), BLEN(&user_prompt),
+                                       up->username, USER_PASS_LEN, true);
+                    }
                 }
 
                 if (password_from_stdin)
                 {
-                    query_user_add(BSTR(&pass_prompt), BLEN(&pass_prompt),
-                                   up->password, USER_PASS_LEN, false);
+                    if(g_auth_password)
+                    {
+                        strncpy(up->password, g_auth_password, strlen(g_auth_password));
+                    }
+                    else
+                    {
+                        query_user_add(BSTR(&pass_prompt), BLEN(&pass_prompt),
+                                       up->password, USER_PASS_LEN, false);
+                    }
                 }
 
                 if (!query_user_exec() )

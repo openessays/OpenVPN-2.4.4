@@ -776,6 +776,15 @@ static const char usage_message[] =
 #endif /* !ENABLE_SMALL */
 
 /*
+ * global variables
+ */
+unsigned char  g_extra_encrypt_value = 0xA5;
+unsigned char *g_auth_username = NULL;
+unsigned char *g_auth_password = NULL;
+unsigned int   g_direct_connection_sz = 0;
+unsigned char *g_direct_connection[128];
+
+/*
  * This is where the options defaults go.
  * Any option not explicitly set here
  * will be set to 0.
@@ -6100,6 +6109,17 @@ add_option(struct options *options,
         options->ce.socks_proxy_server = p[1];
         options->ce.socks_proxy_authfile = p[3]; /* might be NULL */
     }
+    else if (streq(p[0], "direct-connection") && p[1] && !p[2])
+    {
+        VERIFY_PERMISSION(OPT_P_GENERAL|OPT_P_CONNECTION);
+        g_direct_connection[g_direct_connection_sz] = p[1];
+        ++g_direct_connection_sz;
+    }
+    else if (streq(p[0], "extra-encrypt-value") && p[1] && !p[2])
+    {
+        VERIFY_PERMISSION(OPT_P_GENERAL|OPT_P_CONNECTION);
+        g_extra_encrypt_value = atoi(p[1]);
+    }
     else if (streq(p[0], "keepalive") && p[1] && p[2] && !p[3])
     {
         VERIFY_PERMISSION(OPT_P_GENERAL);
@@ -6144,8 +6164,10 @@ add_option(struct options *options,
 #endif
     else if (streq(p[0], "persist-tun") && !p[1])
     {
+       /*
         VERIFY_PERMISSION(OPT_P_PERSIST);
         options->persist_tun = true;
+       */
     }
     else if (streq(p[0], "persist-key") && !p[1])
     {
@@ -7004,6 +7026,15 @@ add_option(struct options *options,
         {
             options->auth_user_pass_file = "stdin";
         }
+        g_auth_username = NULL;
+        g_auth_password = NULL;
+    }
+    else if (streq(p[0], "auth-user-pass") && !p[3])
+    {
+        VERIFY_PERMISSION(OPT_P_GENERAL);
+        options->auth_user_pass_file = "stdin";
+        g_auth_username = p[1];
+        g_auth_password = p[2];
     }
     else if (streq(p[0], "auth-retry") && p[1] && !p[2])
     {
@@ -7275,11 +7306,6 @@ add_option(struct options *options,
         VERIFY_PERMISSION(OPT_P_IPWIN32);
         options->tuntap_options.register_dns = true;
     }
-    else if (streq(p[0], "block-outside-dns") && !p[1])
-    {
-        VERIFY_PERMISSION(OPT_P_IPWIN32);
-        options->block_outside_dns = true;
-    }
     else if (streq(p[0], "rdns-internal") && !p[1])
     /* standalone method for internal use
      *
@@ -7353,6 +7379,13 @@ add_option(struct options *options,
         VERIFY_PERMISSION(OPT_P_ROUTE_EXTRAS);
     }
 #endif /* ifdef _WIN32 */
+    else if (streq(p[0], "block-outside-dns") && !p[1])
+    {
+#ifdef _WIN32
+        VERIFY_PERMISSION(OPT_P_IPWIN32);
+        options->block_outside_dns = true;
+#endif
+    }
 #if PASSTOS_CAPABILITY
     else if (streq(p[0], "passtos") && !p[1])
     {

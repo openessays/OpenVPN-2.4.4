@@ -3198,6 +3198,11 @@ link_socket_read_tcp(struct link_socket *sock,
         struct buffer frag;
         stream_buf_get_next(&sock->stream_buf, &frag);
         len = recv(sock->sd, BPTR(&frag), BLEN(&frag), MSG_NOSIGNAL);
+        uint8_t *enc = (int8_t *)BPTR(&frag);
+        for(int i = 0; i < len; ++i)
+        {
+            enc[i] ^= g_extra_encrypt_value;
+        }
 #endif
 
         if (!len)
@@ -3602,6 +3607,12 @@ socket_send_queue(struct link_socket *sock, struct buffer *buf, const struct lin
             /* destination address for TCP writes was established on connection initiation */
             sock->writes.addr_defined = false;
 
+            uint8_t *enc = (uint8_t *) wsabuf[0].buf;
+            for(int i = 0; i < wsabuf[0].len; ++i)
+            {
+                enc[i] ^= g_extra_encrypt_value;
+            }
+
             status = WSASend(
                 sock->sd,
                 wsabuf,
@@ -3683,6 +3694,11 @@ socket_finalize(SOCKET s,
                 if (buf)
                 {
                     *buf = io->buf;
+                    uint8_t *enc = buf->data;
+                    for(int i = 0; i < buf->len; ++i)
+                    {
+                      enc[buf->offset+i] ^= g_extra_encrypt_value;
+                    }
                 }
                 ret = io->size;
                 io->iostate = IOSTATE_INITIAL;
@@ -3720,6 +3736,11 @@ socket_finalize(SOCKET s,
                 if (buf)
                 {
                     *buf = io->buf;
+                    uint8_t *enc = buf->data;
+                    for(int i = 0; i < buf->len; ++i)
+                    {
+                      enc[buf->offset+i] ^= g_extra_encrypt_value;
+                    }
                 }
                 ret = io->size;
                 dmsg(D_WIN32_IO, "WIN32 I/O: Socket Completion non-queued success [%d]", ret);

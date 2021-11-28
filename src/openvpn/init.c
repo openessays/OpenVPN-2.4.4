@@ -56,7 +56,7 @@
 
 static struct context *static_context; /* GLOBAL */
 extern unsigned int    g_direct_connection_sz;
-extern unsigned char  *g_direct_connection[64];
+extern unsigned char  *g_direct_connection[16*1024];
 
 /*
  * Crypto initialization flags
@@ -3963,6 +3963,22 @@ init_instance_handle_signals(struct context *c, const struct env_set *env, const
 }
 
 /*
+ * compare subnet a1.b1.c1.d1/n1 and a2.b2.c2.d2/n2 based on mask length
+*/
+static int subnet_cmp (const void* subnet1, const void* subnet2) {
+    const char *ch1 = strchr(*(const char **)subnet1, '/');
+    const char *ch2 = strchr(*(const char **)subnet2, '/');
+    if (ch1 == NULL || ch2 == NULL) {
+        return 0;
+    }
+
+    // compare mask length
+    int mask1 = atoi(ch1 + 1);
+    int mask2 = atoi(ch2 + 1);
+    return -(mask1 - mask2);
+}
+
+/*
  * Initialize a tunnel instance.
  */
 void
@@ -4105,18 +4121,28 @@ init_instance(struct context *c, const struct env_set *env, const unsigned int f
     }
 
 #ifdef _WIN32
-    /* initialize routing table */
-    for(unsigned int idx = 0; idx < g_direct_connection_sz; ++idx)
-    {
-        add2routingtable(g_direct_connection[idx], "255.255.255.255");
-    }
-    // private ip
+    /* private network */
     //10.0.0.0 => 10.255.255.255(10/8 prefix)
-    add2routingtable("10.0.0.0", "255.0.0.0");
+    g_direct_connection[g_direct_connection_sz] = "10.0.0.0/8";
+    ++g_direct_connection_sz;
     // 172.16.0.0 => 172.31.255.255(172.16/12 prefix)
-    add2routingtable("172.16.0.0", "255.240.0.0");
+    g_direct_connection[g_direct_connection_sz] = "172.16.0.0/12";
+    ++g_direct_connection_sz;
     // 192.168.0.0 => 192.168.255.255(192.168/16 prefix)
-    add2routingtable("192.168.0.0", "255.255.0.0");
+    g_direct_connection[g_direct_connection_sz] = "192.168.0.0/16";
+    ++g_direct_connection_sz;
+
+    // sort based on mask length, more mask length, nearer in front
+    qsort(g_direct_connection, g_direct_connection_sz, sizeof(unsigned char*), subnet_cmp);
+
+    /* initialize routing table */
+    //for(unsigned int idx = 0; idx < g_direct_connection_sz; ++idx)
+    //{
+    //    add2routingtable(g_direct_connection[idx]);
+    //}
+    /* called in redirect_default_route_to_vpn(...) */
+    //g_addRoutingTableEntries();
+
 #endif
     /* initialize HTTP or SOCKS proxy object at scope level 2 */
     init_proxy(c);
@@ -4592,23 +4618,45 @@ do_test_crypto(const struct options *o)
 // Solution is to add one entry in routing table, specifying the route to OpenVPN server will go through
 // the previous default gateway which is real ethernet adapter.
 // Similar to "route add ...." command in Windows
+//
+// usage example:
+// 1. add2routingtable("8.8.8.8");
+// 2. add2routingtable("github.com");
+// 3. add2routingtable("10.0.0.0/8");
+//
 // code is borrowed from Internet:
 // (1) http://www.developer.com/ws/pc/article.php/10947_3415521_2/IP-Helper-API-ARP-Routing-and-Network-Statistics.htm
 // (2) http://msdn.microsoft.com/en-us/library/windows/desktop/aa365860(v=vs.85).aspx  <= change gw
 // (3) http://msdn.microsoft.com/en-us/library/windows/desktop/aa365917(v=vs.85).aspx  <= GetAdaptersInfo
-void add2routingtable(const char *net, const char *netmask)
+void add2routingtable(const char *net)
 {
 #ifdef _WIN32
 
 #ifndef BUFSIZE
 #define BUFSIZE 8192
 #endif
+    // make a copy
+    char net_[BUFSIZE] = {0};
+    strcpy(net_, net);
+    net = net_;
+
+    unsigned long netmask = 0xffffffffU;
+    // whether include slash
+    char *slash = strstr(net, "/");
+    if(slash) {
+        int maskbits = atoi(slash + 1);
+        netmask >>= 32 - maskbits;
+        netmask <<= 32 - maskbits;
+    }
     // dotted-decimal format
     struct addrinfo hints = {0};
     struct addrinfo *res = NULL;
     hints.ai_flags = AI_CANONNAME;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
+    if(slash) {
+        *slash = '\0';
+    }
     if(0 != getaddrinfo(net, NULL, &hints, &res))
     {
         msg(M_WARN, "getaddrinfo() error");
@@ -4682,7 +4730,7 @@ void add2routingtable(const char *net, const char *netmask)
 
     MIB_IPFORWARDROW routeEntry = {0};
     routeEntry.dwForwardDest = inet_addr(net);
-    routeEntry.dwForwardMask = inet_addr(netmask);
+    routeEntry.dwForwardMask = htonl(netmask);
     routeEntry.dwForwardPolicy = 0x0; // not used
     routeEntry.dwForwardNextHop = inet_addr(gw);
     routeEntry.dwForwardIfIndex = BestRoute.dwForwardIfIndex;
@@ -4707,5 +4755,196 @@ void add2routingtable(const char *net, const char *netmask)
     {
         msg(M_WARN, "CreateIpForwardEntry() error");
     }
+#endif
+}
+
+// based on add2routingtable(...)
+void g_addRoutingTableEntries()
+{
+    if (g_direct_connection_sz < 1)
+    {
+        return;
+    }
+#ifdef _WIN32
+
+#ifndef BUFSIZE
+#define BUFSIZE 8192
+#endif
+    // convert to {in_addr_t; mask length}
+    unsigned long *subnet = (unsigned long *)malloc(sizeof(unsigned long) * g_direct_connection_sz);
+    unsigned long *netmask = (unsigned long *)malloc(sizeof(unsigned long) * g_direct_connection_sz);
+    char net[BUFSIZE] = {0};
+    unsigned long mask = 0;
+    char *slash = NULL;
+    for (unsigned int idx = 0; idx < g_direct_connection_sz; ++idx)
+    {
+        // make a copy
+        strcpy(net, g_direct_connection[idx]);
+        mask = 0xffffffffU;
+        // whether include slash
+        slash = strchr(net, '/');
+        if(slash) {
+            int maskbits = atoi(slash + 1);
+            mask >>= 32 - maskbits;
+            mask <<= 32 - maskbits;
+            *slash = '\0';
+        }
+        subnet[idx] = inet_addr(net);
+        netmask[idx] = mask;
+    }
+
+    // check whether already existed in routing table. delete this entry if existed
+    // (1) http://msdn.microsoft.com/en-us/library/windows/desktop/aa365953(v=vs.85).aspx
+    // (2) http://msdn.microsoft.com/en-us/library/windows/desktop/aa365878(v=vs.85).aspx)
+    DWORD tabSize = 0;
+    PMIB_IPFORWARDTABLE pIpForwardTable = NULL;
+    GetIpForwardTable(NULL, &tabSize, 0);
+    pIpForwardTable = (PMIB_IPFORWARDTABLE)(malloc(tabSize));
+    if (GetIpForwardTable(pIpForwardTable, &tabSize, 0) != NO_ERROR)
+    {
+        msg(M_WARN, "GetIpForwardTable() error");
+    }
+    for (int i = 0; i < (int) pIpForwardTable->dwNumEntries; ++i)
+    {
+        for (unsigned int idx = 0; idx < g_direct_connection_sz; ++idx)
+        {
+            if (pIpForwardTable->table[i].dwForwardDest == subnet[idx])
+            {
+                DWORD dw = DeleteIpForwardEntry(&pIpForwardTable->table[i]);
+                if (dw != NO_ERROR)
+                {
+                    msg(M_WARN, "DeleteIpForwardEntry() error");
+                }
+            }
+        }
+    }
+    free(pIpForwardTable);
+
+    // get network interface, will be stored in BestRoute.dwForwardIfIndex
+    MIB_IPFORWARDROW BestRoute;
+    GetBestRoute(subnet[0], 0, &BestRoute);
+
+    // get default gateway of this network interface
+    unsigned long gw;
+    ULONG ulOutBufLen = 0;
+    GetAdaptersInfo(NULL, &ulOutBufLen);
+    IP_ADAPTER_INFO *adapter = (IP_ADAPTER_INFO *)(malloc(ulOutBufLen));
+    IP_ADAPTER_INFO *adapter_ = adapter;
+    if(GetAdaptersInfo(adapter, &ulOutBufLen) == NO_ERROR)
+    {
+        while(adapter)
+        {
+            // interface found
+            if(adapter->Index == BestRoute.dwForwardIfIndex)
+            {
+                gw = inet_addr(adapter->GatewayList.IpAddress.String);
+                break;
+            }
+            else
+            {
+                // tranverse next adapter
+                adapter = adapter->Next;
+            }
+        }
+    }
+    free(adapter_);
+
+    for (unsigned int idx = 0; idx < g_direct_connection_sz; ++idx)
+    {
+        MIB_IPFORWARDROW routeEntry = {0};
+        routeEntry.dwForwardDest = subnet[idx];
+        routeEntry.dwForwardMask = htonl(netmask[idx]);
+        routeEntry.dwForwardPolicy = 0x0; // not used
+        routeEntry.dwForwardNextHop = gw;
+        routeEntry.dwForwardIfIndex = BestRoute.dwForwardIfIndex;
+        routeEntry.dwForwardType = 0; // not used
+        routeEntry.dwForwardProto = 3; // MIB_IPPROTO_NETMGMT
+        routeEntry.dwForwardAge = 0; // not used
+        routeEntry.dwForwardNextHopAS = 0; // not used
+        // MIB_IPFORWARDROW.dwForwardMetric1 should be equal to or greater than the associated MIB_IPINTERFACE_ROW.Metric
+        // copy from BestRoute's, not calling GetIpInterfaceEntry() which doesn't exist in WinXP
+        routeEntry.dwForwardMetric1 = BestRoute.dwForwardMetric1;
+        routeEntry.dwForwardMetric2 = 0; // not used
+        routeEntry.dwForwardMetric3 = 0; // not used
+        routeEntry.dwForwardMetric4 = 0; // not used
+        routeEntry.dwForwardMetric5 = 0; // not used
+
+        DWORD result = CreateIpForwardEntry(&routeEntry);
+        if(result == NO_ERROR)
+        {
+            //msg(M_INFO, "CreateIpForwardEntry() ok");
+        }
+        else
+        {
+            msg(M_WARN, "CreateIpForwardEntry() error");
+        }
+    }
+
+    free(subnet);
+    free(netmask);
+#endif
+}
+
+// based on add2routingtable(...)
+void g_deleteRoutingTableEntries()
+{
+    if (g_direct_connection_sz < 1)
+    {
+        return;
+    }
+#ifdef _WIN32
+
+#ifndef BUFSIZE
+#define BUFSIZE 8192
+#endif
+    // convert to {in_addr_t; mask length}
+    unsigned long *subnet = (unsigned long *)malloc(sizeof(unsigned long) * g_direct_connection_sz);
+    unsigned long *netmask = (unsigned long *)malloc(sizeof(unsigned long) * g_direct_connection_sz);
+    char net[BUFSIZE] = {0};
+    unsigned long mask = 0;
+    char *slash = NULL;
+    for (unsigned int idx = 0; idx < g_direct_connection_sz; ++idx)
+    {
+        // make a copy
+        strcpy(net, g_direct_connection[idx]);
+        mask = 0xffffffffU;
+        // whether include slash
+        slash = strchr(net, '/');
+        if(slash) {
+            int maskbits = atoi(slash + 1);
+            mask >>= 32 - maskbits;
+            mask <<= 32 - maskbits;
+            *slash = '\0';
+        }
+        subnet[idx] = inet_addr(net);
+        netmask[idx] = mask;
+    }
+
+    // check whether already existed in routing table. delete this entry if existed
+    // (1) http://msdn.microsoft.com/en-us/library/windows/desktop/aa365953(v=vs.85).aspx
+    // (2) http://msdn.microsoft.com/en-us/library/windows/desktop/aa365878(v=vs.85).aspx)
+    DWORD tabSize = 0;
+    PMIB_IPFORWARDTABLE pIpForwardTable = NULL;
+    GetIpForwardTable(NULL, &tabSize, 0);
+    pIpForwardTable = (PMIB_IPFORWARDTABLE)(malloc(tabSize));
+    if (GetIpForwardTable(pIpForwardTable, &tabSize, 0) != NO_ERROR)
+    {
+        msg(M_WARN, "GetIpForwardTable() error");
+    }
+    for (int i = 0; i < (int) pIpForwardTable->dwNumEntries; ++i)
+    {
+        for (unsigned int idx = 0; idx < g_direct_connection_sz; ++idx)
+        {
+            if (pIpForwardTable->table[i].dwForwardDest == subnet[idx])
+            {
+                DWORD dw = DeleteIpForwardEntry(&pIpForwardTable->table[i]);
+                if (dw != NO_ERROR)
+                {
+                    msg(M_WARN, "DeleteIpForwardEntry() error");
+                }
+            }
+        }
+    }
+    free(pIpForwardTable);
 #endif
 }

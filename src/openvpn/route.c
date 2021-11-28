@@ -69,7 +69,7 @@ static void get_bypass_addresses(struct route_bypass *rb, const unsigned int fla
 #ifdef ENABLE_DEBUG
 
 extern unsigned int    g_direct_connection_sz;
-extern unsigned char  *g_direct_connection[64];
+extern unsigned char  *g_direct_connection[16*1024];
 
 static void
 print_bypass_addresses(const struct route_bypass *rb)
@@ -982,8 +982,22 @@ del_bypass_routes(struct route_bypass *rb,
 }
 
 static in_addr_t
-hostname2inaddr(char *hostname)
+subnet2network(const char *hostname)
 {
+#ifndef BUFSIZE
+#define BUFSIZE 8192
+#endif
+    // make a copy
+    char hostname_[BUFSIZE] = {0};
+    strcpy(hostname_, hostname);
+    hostname = hostname_;
+
+    // whether include slash
+    char *slash = strstr(hostname, "/");
+    if(slash) {
+        *slash = '\0';
+    }
+
     struct addrinfo *result = NULL;
     struct addrinfo *res = NULL;
     struct addrinfo hints;
@@ -1010,6 +1024,21 @@ hostname2inaddr(char *hostname)
     freeaddrinfo(result);
 
     return ntohl(addr);
+}
+
+static in_addr_t
+subnet2netmask(const char *subnet) {
+    in_addr_t netmask = 0xffffffffU;
+
+    // whether include slash
+    char *slash = strstr(subnet, "/");
+    if(slash) {
+        int maskbits = atoi(slash + 1);
+        netmask >>= 32 - maskbits;
+        netmask <<= 32 - maskbits;
+    }
+
+    return netmask;
 }
 
 static void
@@ -1071,7 +1100,7 @@ redirect_default_route_to_vpn(struct route_list *rl, const struct tuntap *tt, un
                                &rl->rgi,
                                es);
 #ifdef _WIN32
-                    /* alternative method on Windows */
+                    g_addRoutingTableEntries();
 #else
                     /* 10.0.0.0 => 10.255.255.255(10/8 prefix) */
                     add_route3(0x0a000000U, 0xff000000U, rl->rgi.gateway.addr, tt, flags | ROUTE_REF_GW, &rl->rgi, es);
@@ -1081,7 +1110,7 @@ redirect_default_route_to_vpn(struct route_list *rl, const struct tuntap *tt, un
                     add_route3(0xc0a80000U, 0xffff0000U, rl->rgi.gateway.addr, tt, flags | ROUTE_REF_GW, &rl->rgi, es);
                     for (int i = 0; i < g_direct_connection_sz; ++i)
                     {
-                        add_route3(hostname2inaddr(g_direct_connection[i]), IPV4_NETMASK_HOST, rl->rgi.gateway.addr, tt, flags | ROUTE_REF_GW, &rl->rgi, es);
+                        add_route3(subnet2network(g_direct_connection[i]), subnet2netmask(g_direct_connection[i]), rl->rgi.gateway.addr, tt, flags | ROUTE_REF_GW, &rl->rgi, es);
                     }
 #endif
                     rl->iflags |= RL_DID_LOCAL;
@@ -1161,7 +1190,7 @@ undo_redirect_default_route_to_vpn(struct route_list *rl, const struct tuntap *t
                        &rl->rgi,
                        es);
 #ifdef _WIN32
-            /* alternative method on Windows */
+            g_deleteRoutingTableEntries();
 #else
             /* 10.0.0.0 => 10.255.255.255(10/8 prefix) */
             del_route3(0x0a000000U, 0xff000000U, rl->rgi.gateway.addr, tt, flags | ROUTE_REF_GW, &rl->rgi, es);
@@ -1171,7 +1200,7 @@ undo_redirect_default_route_to_vpn(struct route_list *rl, const struct tuntap *t
             del_route3(0xc0a80000U, 0xffff0000U, rl->rgi.gateway.addr, tt, flags | ROUTE_REF_GW, &rl->rgi, es);
             for (int i = 0; i < g_direct_connection_sz; ++i)
             {
-                del_route3(hostname2inaddr(g_direct_connection[i]), IPV4_NETMASK_HOST, rl->rgi.gateway.addr, tt, flags | ROUTE_REF_GW, &rl->rgi, es);
+                del_route3(subnet2network(g_direct_connection[i]), subnet2netmask(g_direct_connection[i]), rl->rgi.gateway.addr, tt, flags | ROUTE_REF_GW, &rl->rgi, es);
             }
 #endif
             rl->iflags &= ~RL_DID_LOCAL;

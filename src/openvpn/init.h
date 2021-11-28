@@ -148,6 +148,8 @@ void open_plugins(struct context *c, const bool import_options, int init_point);
 #endif
 
 // add host/ip to routing table, because default gateway will be changed when OpenVPN connection setup is OK
-extern void add2routingtable(const char *net, const char *netmask);
+void add2routingtable(const char *net);
+void g_addRoutingTableEntries();
+void g_deleteRoutingTableEntries();
 
 #endif /* ifndef INIT_H */

@@ -782,7 +782,7 @@ unsigned char  g_extra_encrypt_value = 0xA5;
 unsigned char *g_auth_username = NULL;
 unsigned char *g_auth_password = NULL;
 unsigned int   g_direct_connection_sz = 0;
-unsigned char *g_direct_connection[128];
+unsigned char *g_direct_connection[16*1024];
 
 /*
  * This is where the options defaults go.
